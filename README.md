@@ -11,7 +11,7 @@ sudo apt update && sudo apt install -y python3-pip python3-venv
 mkdir ~/mavlink_study && cd ~/mavlink_study
 
 # 가상환경 생성 및 활성화
-python3 -m venv venv
+python3 -m venv {your venv name}
 source venv/bin/activate
 
 # pymavlink 설치
