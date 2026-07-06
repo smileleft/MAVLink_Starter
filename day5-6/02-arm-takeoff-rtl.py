@@ -56,3 +56,19 @@ time.sleep(5)  # 잠시 공중에 머무름
 # 5) RTL (Return to Launch)
 set_mode("RTL")
 print("RTL 모드 전환, 귀환 시작")
+
+# 착륙 완료까지 모니터링
+while True:
+    msg = master.recv_match(type='HEARTBEAT', blocking=True)
+    mode = mavutil.mode_string_v10(msg)
+    armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+    
+    alt_msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=1)
+    if alt_msg:
+        alt = alt_msg.relative_alt / 1000.0
+        print(f"모드: {mode} | 고도: {alt:.1f}m | ARMED: {armed}")
+    
+    # DISARM 되면 착륙 완료
+    if not armed:
+        print("착륙 완료 및 DISARM 확인")
+        break
