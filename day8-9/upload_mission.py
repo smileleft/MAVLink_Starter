@@ -15,6 +15,9 @@ from pymavlink import mavutil
 print("[1] SITL 연결 시도...")
 master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
 master.wait_heartbeat()
+
+# ↓↓↓ 이 줄 추가: 브로드캐스트(0) 대신 오토파일럿 본체(1)로 명시 고정
+master.target_component = 1
 print(f"연결 완료 (system={master.target_system}, component={master.target_component})")
 
 
