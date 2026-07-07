@@ -16,11 +16,9 @@ print("[1] SITL 연결 시도...")
 master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
 master.wait_heartbeat()
 
-# 브로드캐스트(0) 대신 오토파일럿 본체(1)로 명시 고정
 master.target_component = 1
 print(f"연결 완료 (system={master.target_system}, component={master.target_component})")
 
-# 이전 세션에서 남은 stale 메시지 비우기
 print("[1-1] 기존 버퍼 메시지 비우는 중...")
 flushed = 0
 while True:
@@ -30,7 +28,6 @@ while True:
     flushed += 1
 print(f"  -> {flushed}개 stale 메시지 제거 완료")
 
-# GPS/EKF 준비 대기 (홈 포지션이 안 잡힌 상태에서 미션 업로드 시 검증 실패 방지)
 print("[1-2] GPS 준비 대기 중...")
 master.recv_match(
     type='GPS_RAW_INT',
@@ -42,13 +39,12 @@ print("  -> GPS 준비 완료")
 
 
 # -----------------------------
-# 2. 미션 아이템 정의 (홈 기준 상대 좌표계 사용)
+# 2. 미션 아이템 정의
 # -----------------------------
 HOME_LAT = -35.363262
 HOME_LON = 149.165237
 
 waypoints = [
-    # (lat, lon, alt)
     (HOME_LAT + 0.0005, HOME_LON,           10),  # WP1
     (HOME_LAT + 0.0005, HOME_LON + 0.0005,  15),  # WP2
     (HOME_LAT,          HOME_LON + 0.0005,  10),  # WP3
@@ -56,14 +52,13 @@ waypoints = [
 
 
 def make_mission_item_int(seq, lat, lon, alt):
-    """INT 버전 (MISSION_REQUEST_INT에 대한 응답)"""
     frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
     command = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
     return master.mav.mission_item_int_encode(
         master.target_system, master.target_component,
         seq, frame, command,
         0, 1,
-        0, 2, 0, 0,   # param2(accept radius) = 2m로 명시
+        0, 2, 0, 0,
         int(lat * 1e7),
         int(lon * 1e7),
         alt,
@@ -72,14 +67,13 @@ def make_mission_item_int(seq, lat, lon, alt):
 
 
 def make_mission_item_float(seq, lat, lon, alt):
-    """구버전 (MISSION_REQUEST에 대한 응답) - 위경도를 float 그대로 사용"""
     frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
     command = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
     return master.mav.mission_item_encode(
         master.target_system, master.target_component,
         seq, frame, command,
         0, 1,
-        0, 2, 0, 0,   # param2(accept radius) = 2m로 명시
+        0, 2, 0, 0,
         lat,
         lon,
         alt,
@@ -87,39 +81,50 @@ def make_mission_item_float(seq, lat, lon, alt):
     )
 
 
-def get_latest_request(timeout=5):
-    """
-    MISSION_REQUEST(_INT) 또는 MISSION_ACK를 받되,
-    소켓 버퍼에 이미 쌓여있는 '낡은 중복 요청'이 있으면
-    가장 최근 것만 남기고 나머지는 버린다.
+REQUEST_TYPES = ['MISSION_REQUEST_INT', 'MISSION_REQUEST']
+ALL_TYPES = REQUEST_TYPES + ['MISSION_ACK']
 
-    이게 핵심 수정 포인트: 버퍼에 쌓인 stale 재요청을 그대로
-    처리하다가 이미 진행된 시퀀스에 대해 응답을 다시 보내는 바람에
-    INVALID_SEQUENCE 오류가 발생하는 문제를 방지한다.
-    """
-    types = ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK']
 
-    msg = master.recv_match(type=types, blocking=True, timeout=timeout)
-    if msg is None:
+def get_next_action(timeout=5):
+    """
+    미션 업로드 중 다음에 처리할 메시지 하나를 결정한다.
+
+    규칙:
+    1) 버퍼에 MISSION_ACK가 하나라도 있으면 무조건 그것을 우선 반환한다.
+       ACK는 "이 거래는 끝났다"는 신호이므로, 그 이후에 뒤섞여 도착한
+       낡은 재요청(MISSION_REQUEST)으로 절대 덮어써서는 안 된다.
+       (이 부분이 이전 시도들에서 반복적으로 실패한 근본 원인이었다)
+    2) ACK가 없다면, 같은 배치 안에 쌓인 요청들 중 seq가 가장 높은 것,
+       즉 가장 앞서 나간 요청만 채택하고 낡은 저 seq 중복 요청은 버린다.
+    """
+    first = master.recv_match(type=ALL_TYPES, blocking=True, timeout=timeout)
+    if first is None:
         return None
 
-    latest = msg
-    # 이미 버퍼에 더 최신 메시지가 쌓여있다면 계속 비블로킹으로 흡수
+    batch = [first]
     while True:
-        more = master.recv_match(type=types, blocking=False)
+        more = master.recv_match(type=ALL_TYPES, blocking=False)
         if more is None:
             break
-        latest = more
+        batch.append(more)
 
-    if latest is not msg:
-        print(f"    [정보] 낡은 중복 요청 {msg.get_type()}(seq={getattr(msg, 'seq', '-')}) 폐기, "
-              f"최신 {latest.get_type()}(seq={getattr(latest, 'seq', '-')}) 사용")
+    acks = [m for m in batch if m.get_type() == 'MISSION_ACK']
+    if acks:
+        if len(batch) > 1:
+            print(f"    [정보] 배치 내 MISSION_ACK 발견 → 세션 종료 신호 우선 처리 "
+                  f"(폐기된 나머지: {[ (m.get_type(), getattr(m,'seq','-')) for m in batch if m is not acks[-1] ]})")
+        return acks[-1]
 
-    return latest
+    requests = sorted(batch, key=lambda m: m.seq)
+    chosen = requests[-1]
+    if len(batch) > 1:
+        print(f"    [정보] 낡은 중복 요청 {len(batch)-1}개 폐기, "
+              f"최신 {chosen.get_type()}(seq={chosen.seq}) 사용")
+    return chosen
 
 
 # -----------------------------
-# 3. 미션 업로드 (MISSION_COUNT → 요청에 응답)
+# 3. 미션 업로드
 # -----------------------------
 def upload_mission():
     total = len(waypoints)
@@ -133,7 +138,7 @@ def upload_mission():
     )
 
     while True:
-        msg = get_latest_request(timeout=5)
+        msg = get_next_action(timeout=5)
         if msg is None:
             print("타임아웃: 응답을 받지 못했습니다.")
             return False
@@ -142,7 +147,7 @@ def upload_mission():
         print(f" [DEBUG] from system={msg.get_srcSystem()}, "
               f"component={msg.get_srcComponent()}, type={mtype}")
 
-        if mtype in ('MISSION_REQUEST_INT', 'MISSION_REQUEST'):
+        if mtype in REQUEST_TYPES:
             seq = msg.seq
             if seq >= total:
                 continue
@@ -167,7 +172,7 @@ def upload_mission():
 
 
 # -----------------------------
-# 4. ARM + 이륙 (AUTO 모드 진입 전 준비)
+# 4. ARM + 이륙
 # -----------------------------
 def arm_and_takeoff(target_altitude=10):
     print("[4] GUIDED 모드로 전환 후 ARM...")
@@ -200,7 +205,7 @@ def arm_and_takeoff(target_altitude=10):
 
 
 # -----------------------------
-# 5. AUTO 모드 전환 (미션 자동 실행)
+# 5. AUTO 모드 전환
 # -----------------------------
 def start_auto_mission():
     print("[5] AUTO 모드 전환...")
