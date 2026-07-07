@@ -338,17 +338,6 @@ MAV> param show RTL_ALT
 
 ---
 
-## 기존 경험과의 연결
-
-| 기존 기술 | Day 5-6 대응 개념 |
-|---|---|
-| Serial 통신 (`pyserial`) | `mavutil.mavlink_connection('serial:/dev/ttyUSB0')` |
-| WebSocket 메시지 송수신 | UDP `send` / `recv_match` |
-| RabbitMQ AMQP 헤더+페이로드 | MAVLink 패킷 (system_id + msgid + payload) |
-| RPC 요청/응답 패턴 | `command_long_send` → `COMMAND_ACK` |
-
----
-
 ## 다음 단계 (Day 7)
 
 - ROS2 Humble 설치 및 talker/listener 통신 확인
