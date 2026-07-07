@@ -12,7 +12,7 @@ Day 5-6에서 구성한 ArduPilot SITL 환경이 필요합니다.
 ```bash
 # ArduPilot 클론 경로에서 SITL 실행 확인
 cd ~/ardupilot
-sim_vehicle.py -v ArduCopter --console --map
+Tools/autotest/sim_vehicle.py -v ArduCopter --console --map
 ```
 
 `pymavlink`가 설치되어 있어야 합니다.
