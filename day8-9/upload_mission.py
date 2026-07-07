@@ -88,6 +88,10 @@ def upload_mission():
             blocking=True,
             timeout=5
         )
+
+        if msg:
+            print(f" [DEBUG] from system={msg.get_srcSystem()}, component={msg.get_srcComponent()}, type={msg.get_type()}")
+        
         if msg is None:
             print("타임아웃: 응답을 받지 못했습니다.")
             return False
