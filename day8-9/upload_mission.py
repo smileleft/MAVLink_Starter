@@ -69,34 +69,35 @@ def upload_mission():
         mavutil.mavlink.MAV_MISSION_TYPE_MISSION
     )
 
-    uploaded = 0
-    while uploaded < total:
+    while True:
         msg = master.recv_match(
-            type=['MISSION_REQUEST_INT', 'MISSION_REQUEST'],
+            type=['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'],
             blocking=True,
             timeout=5
         )
         if msg is None:
-            print("타임아웃: MISSION_REQUEST를 받지 못했습니다.")
-            break
+            print("타임아웃: 응답을 받지 못했습니다.")
+            return False
 
-        seq = msg.seq
-        lat, lon, alt = waypoints[seq]
-        print(f"  -> 요청 받음: seq={seq}, 전송: ({lat}, {lon}, {alt}m)")
+        mtype = msg.get_type()
 
-        item = make_mission_item(seq, lat, lon, alt)
-        master.mav.send(item)
-        uploaded += 1
+        if mtype in ('MISSION_REQUEST_INT', 'MISSION_REQUEST'):
+            seq = msg.seq
+            if seq >= total:
+                # 방어 코드: 범위 밖 요청은 무시
+                continue
+            lat, lon, alt = waypoints[seq]
+            print(f"  -> 요청 받음: seq={seq}, 전송: ({lat}, {lon}, {alt}m)")
+            item = make_mission_item(seq, lat, lon, alt)
+            master.mav.send(item)
 
-    # 최종 ACK 확인
-    ack = master.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
-    if ack and ack.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
-        print("[3] MISSION_ACK: 업로드 성공")
-        return True
-    else:
-        print(f"[3] MISSION_ACK: 실패 또는 응답 없음 ({ack})")
-        return False
-
+        elif mtype == 'MISSION_ACK':
+            if msg.type == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                print("[3] MISSION_ACK: 업로드 성공")
+                return True
+            else:
+                print(f"[3] MISSION_ACK: 실패 (에러 코드: {msg.type})")
+                return False
 
 # -----------------------------
 # 4. ARM + 이륙 (AUTO 모드 진입 전 준비)
