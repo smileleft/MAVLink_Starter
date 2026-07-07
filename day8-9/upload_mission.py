@@ -20,6 +20,16 @@ master.wait_heartbeat()
 master.target_component = 1
 print(f"연결 완료 (system={master.target_system}, component={master.target_component})")
 
+# ↓↓↓ 추가: 이전 세션에서 남은 stale 메시지 비우기
+print("[1-1] 기존 버퍼 메시지 비우는 중...")
+flushed = 0
+while True:
+    msg = master.recv_match(blocking=False)
+    if msg is None:
+        break
+    flushed += 1
+print(f"  -> {flushed}개 stale 메시지 제거 완료")
+
 
 # -----------------------------
 # 2. 미션 아이템 정의 (홈 기준 상대 좌표계 사용)
