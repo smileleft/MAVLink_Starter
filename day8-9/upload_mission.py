@@ -16,11 +16,11 @@ print("[1] SITL 연결 시도...")
 master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
 master.wait_heartbeat()
 
-# ↓↓↓ 이 줄 추가: 브로드캐스트(0) 대신 오토파일럿 본체(1)로 명시 고정
+# 브로드캐스트(0) 대신 오토파일럿 본체(1)로 명시 고정
 master.target_component = 1
 print(f"연결 완료 (system={master.target_system}, component={master.target_component})")
 
-# ↓↓↓ 추가: 이전 세션에서 남은 stale 메시지 비우기
+# 이전 세션에서 남은 stale 메시지 비우기
 print("[1-1] 기존 버퍼 메시지 비우는 중...")
 flushed = 0
 while True:
@@ -30,12 +30,20 @@ while True:
     flushed += 1
 print(f"  -> {flushed}개 stale 메시지 제거 완료")
 
+# GPS/EKF 준비 대기 (홈 포지션이 안 잡힌 상태에서 미션 업로드 시 검증 실패 방지)
+print("[1-2] GPS 준비 대기 중...")
+master.recv_match(
+    type='GPS_RAW_INT',
+    condition='GPS_RAW_INT.fix_type >= 3',
+    blocking=True,
+    timeout=30
+)
+print("  -> GPS 준비 완료")
+
 
 # -----------------------------
 # 2. 미션 아이템 정의 (홈 기준 상대 좌표계 사용)
 # -----------------------------
-# 실습용 홈 위치 근처 임의 좌표 (SITL 기본 스폰 위치: CMAC 활주로 근방)
-# 실제 값은 SITL 콘솔에 뜨는 홈 좌표를 참고해 조정 가능
 HOME_LAT = -35.363262
 HOME_LON = 149.165237
 
@@ -47,27 +55,6 @@ waypoints = [
 ]
 
 
-def make_mission_item(seq, lat, lon, alt):
-    """MISSION_ITEM_INT 메시지 생성 헬퍼"""
-    frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
-    command = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
-
-    return master.mav.mission_item_int_encode(
-        master.target_system,
-        master.target_component,
-        seq,
-        frame,
-        command,
-        0,          # current (0: 일반 웨이포인트)
-        1,          # autocontinue
-        0, 0, 0, 0,             # param1~4 (accept radius 등, 기본값 0)
-        int(lat * 1e7),
-        int(lon * 1e7),
-        alt,
-        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
-    )
-
-
 def make_mission_item_int(seq, lat, lon, alt):
     """INT 버전 (MISSION_REQUEST_INT에 대한 응답)"""
     frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
@@ -76,7 +63,7 @@ def make_mission_item_int(seq, lat, lon, alt):
         master.target_system, master.target_component,
         seq, frame, command,
         0, 1,
-        0, 0, 0, 0,
+        0, 2, 0, 0,   # param2(accept radius) = 2m로 명시
         int(lat * 1e7),
         int(lon * 1e7),
         alt,
@@ -92,12 +79,43 @@ def make_mission_item_float(seq, lat, lon, alt):
         master.target_system, master.target_component,
         seq, frame, command,
         0, 1,
-        0, 0, 0, 0,
-        lat,      # float, ×1e7 하지 않음
-        lon,      # float, ×1e7 하지 않음
+        0, 2, 0, 0,   # param2(accept radius) = 2m로 명시
+        lat,
+        lon,
         alt,
         mavutil.mavlink.MAV_MISSION_TYPE_MISSION
     )
+
+
+def get_latest_request(timeout=5):
+    """
+    MISSION_REQUEST(_INT) 또는 MISSION_ACK를 받되,
+    소켓 버퍼에 이미 쌓여있는 '낡은 중복 요청'이 있으면
+    가장 최근 것만 남기고 나머지는 버린다.
+
+    이게 핵심 수정 포인트: 버퍼에 쌓인 stale 재요청을 그대로
+    처리하다가 이미 진행된 시퀀스에 대해 응답을 다시 보내는 바람에
+    INVALID_SEQUENCE 오류가 발생하는 문제를 방지한다.
+    """
+    types = ['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK']
+
+    msg = master.recv_match(type=types, blocking=True, timeout=timeout)
+    if msg is None:
+        return None
+
+    latest = msg
+    # 이미 버퍼에 더 최신 메시지가 쌓여있다면 계속 비블로킹으로 흡수
+    while True:
+        more = master.recv_match(type=types, blocking=False)
+        if more is None:
+            break
+        latest = more
+
+    if latest is not msg:
+        print(f"    [정보] 낡은 중복 요청 {msg.get_type()}(seq={getattr(msg, 'seq', '-')}) 폐기, "
+              f"최신 {latest.get_type()}(seq={getattr(latest, 'seq', '-')}) 사용")
+
+    return latest
 
 
 # -----------------------------
@@ -115,33 +133,26 @@ def upload_mission():
     )
 
     while True:
-        msg = master.recv_match(
-            type=['MISSION_REQUEST_INT', 'MISSION_REQUEST', 'MISSION_ACK'],
-            blocking=True,
-            timeout=5
-        )
-
-        if msg:
-            print(f" [DEBUG] from system={msg.get_srcSystem()}, component={msg.get_srcComponent()}, type={msg.get_type()}")
-        
+        msg = get_latest_request(timeout=5)
         if msg is None:
             print("타임아웃: 응답을 받지 못했습니다.")
             return False
 
         mtype = msg.get_type()
+        print(f" [DEBUG] from system={msg.get_srcSystem()}, "
+              f"component={msg.get_srcComponent()}, type={mtype}")
 
         if mtype in ('MISSION_REQUEST_INT', 'MISSION_REQUEST'):
             seq = msg.seq
-        
             if seq >= total:
                 continue
-    
+
             lat, lon, alt = waypoints[seq]
             print(f"  -> 요청 받음: seq={seq} ({mtype}), 전송: ({lat}, {lon}, {alt}m)")
 
             if mtype == 'MISSION_REQUEST_INT':
                 item = make_mission_item_int(seq, lat, lon, alt)
-            else:  # MISSION_REQUEST (구버전)
+            else:
                 item = make_mission_item_float(seq, lat, lon, alt)
 
             master.mav.send(item)
@@ -153,6 +164,7 @@ def upload_mission():
             else:
                 print(f"[3] MISSION_ACK: 실패 (에러 코드: {msg.type})")
                 return False
+
 
 # -----------------------------
 # 4. ARM + 이륙 (AUTO 모드 진입 전 준비)
@@ -178,10 +190,9 @@ def arm_and_takeoff(target_altitude=10):
     )
     print(f"  -> TAKEOFF 명령 전송 (목표 고도 {target_altitude}m)")
 
-    # 목표 고도 근접까지 대기
     while True:
         msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
-        alt = msg.relative_alt / 1000.0  # mm -> m
+        alt = msg.relative_alt / 1000.0
         print(f"     현재 고도: {alt:.1f} m")
         if alt >= target_altitude * 0.95:
             print("  -> 목표 고도 도달")
