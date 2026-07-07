@@ -68,6 +68,38 @@ def make_mission_item(seq, lat, lon, alt):
     )
 
 
+def make_mission_item_int(seq, lat, lon, alt):
+    """INT 버전 (MISSION_REQUEST_INT에 대한 응답)"""
+    frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    command = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+    return master.mav.mission_item_int_encode(
+        master.target_system, master.target_component,
+        seq, frame, command,
+        0, 1,
+        0, 0, 0, 0,
+        int(lat * 1e7),
+        int(lon * 1e7),
+        alt,
+        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+    )
+
+
+def make_mission_item_float(seq, lat, lon, alt):
+    """구버전 (MISSION_REQUEST에 대한 응답) - 위경도를 float 그대로 사용"""
+    frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    command = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+    return master.mav.mission_item_encode(
+        master.target_system, master.target_component,
+        seq, frame, command,
+        0, 1,
+        0, 0, 0, 0,
+        lat,      # float, ×1e7 하지 않음
+        lon,      # float, ×1e7 하지 않음
+        alt,
+        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+    )
+
+
 # -----------------------------
 # 3. 미션 업로드 (MISSION_COUNT → 요청에 응답)
 # -----------------------------
@@ -100,12 +132,18 @@ def upload_mission():
 
         if mtype in ('MISSION_REQUEST_INT', 'MISSION_REQUEST'):
             seq = msg.seq
+        
             if seq >= total:
-                # 방어 코드: 범위 밖 요청은 무시
                 continue
+    
             lat, lon, alt = waypoints[seq]
-            print(f"  -> 요청 받음: seq={seq}, 전송: ({lat}, {lon}, {alt}m)")
-            item = make_mission_item(seq, lat, lon, alt)
+            print(f"  -> 요청 받음: seq={seq} ({mtype}), 전송: ({lat}, {lon}, {alt}m)")
+
+            if mtype == 'MISSION_REQUEST_INT':
+                item = make_mission_item_int(seq, lat, lon, alt)
+            else:  # MISSION_REQUEST (구버전)
+                item = make_mission_item_float(seq, lat, lon, alt)
+
             master.mav.send(item)
 
         elif mtype == 'MISSION_ACK':
