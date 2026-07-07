@@ -67,13 +67,13 @@ Tools/environment_install/install-prereqs-ubuntu.sh -y
 ## Step 2 | SITL 실행
 
 ```bash
-cd ~/ardupilot/ArduCopter
+cd ~/ardupilot
 
 # GUI 없는 환경 (WSL2 권장)
-sim_vehicle.py -v ArduCopter --out udp:127.0.0.1:14551
+Tools/autotest/sim_vehicle.py -v ArduCopter --out udp:127.0.0.1:14551
 
 # GUI 있는 환경 (X11 사용 가능할 때)
-sim_vehicle.py -v ArduCopter --console --map --out udp:127.0.0.1:14551
+Tools/autotest/sim_vehicle.py -v ArduCopter --console --map --out udp:127.0.0.1:14551
 ```
 
 | 옵션 | 설명 |
@@ -253,7 +253,7 @@ while True:
 터미널 3개를 동시에 열어 실행하면 "명령 → 상태 변화" 흐름을 실시간으로 관찰할 수 있습니다.
 
 ```
-터미널 1  │  sim_vehicle.py -v ArduCopter --out udp:127.0.0.1:14551
+터미널 1  │  {ardupilot 경로}/Tools/autotest/sim_vehicle.py -v ArduCopter --out udp:127.0.0.1:14551
 터미널 2  │  python3 03_telemetry_monitor.py   ← 모니터링 먼저 켜기
 터미널 3  │  python3 02_arm_takeoff_rtl.py     ← 명령 전송
 ```
