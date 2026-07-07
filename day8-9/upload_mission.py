@@ -4,6 +4,11 @@ AUTO 모드로 자동비행을 실행하는 스크립트
 
 전제:
 - ArduPilot SITL이 udp:127.0.0.1:14550 으로 떠 있어야 함
+
+핵심 포인트:
+- ArduPilot은 업로드된 미션의 seq=0을 "홈 포지션"으로 취급한다.
+  따라서 seq=0에는 반드시 현재 위치를 기반으로 한 홈 아이템을 넣고,
+  실제 웨이포인트는 seq=1부터 시작해야 한다.
 """
 
 import time
@@ -39,21 +44,49 @@ print("  -> GPS 준비 완료")
 
 
 # -----------------------------
+# 1-3. 현재 위치(=홈 포지션) 조회
+# -----------------------------
+print("[1-3] 현재 위치(홈 포지션) 조회 중...")
+pos_msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True, timeout=10)
+if pos_msg is None:
+    raise RuntimeError("GLOBAL_POSITION_INT를 받지 못했습니다. SITL 상태를 확인하세요.")
+
+HOME_LAT = pos_msg.lat / 1e7
+HOME_LON = pos_msg.lon / 1e7
+HOME_ALT_AMSL = pos_msg.alt / 1000.0  # mm -> m, 절대고도(AMSL)
+print(f"  -> 홈 포지션: lat={HOME_LAT}, lon={HOME_LON}, alt(AMSL)={HOME_ALT_AMSL}m")
+
+
+# -----------------------------
 # 2. 미션 아이템 정의
 # -----------------------------
-HOME_LAT = -35.363262
-HOME_LON = 149.165237
-
-waypoints = [
-    (HOME_LAT + 0.0005, HOME_LON,           10),  # WP1
-    (HOME_LAT + 0.0005, HOME_LON + 0.0005,  15),  # WP2
-    (HOME_LAT,          HOME_LON + 0.0005,  10),  # WP3
+# seq=0 : 홈 포지션 (ArduPilot 관례상 반드시 필요, 절대고도 프레임 사용)
+# seq=1~3 : 실제 웨이포인트 (상대고도 프레임 사용)
+nav_waypoints = [
+    (HOME_LAT + 0.0005, HOME_LON,           10),  # WP1 -> seq=1
+    (HOME_LAT + 0.0005, HOME_LON + 0.0005,  15),  # WP2 -> seq=2
+    (HOME_LAT,          HOME_LON + 0.0005,  10),  # WP3 -> seq=3
 ]
 
+# 전체 미션 아이템: (lat, lon, alt, frame, command, is_home)
+mission_items = [
+    (HOME_LAT, HOME_LON, HOME_ALT_AMSL,
+     mavutil.mavlink.MAV_FRAME_GLOBAL,
+     mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+     True),  # seq=0: 홈
+]
+for lat, lon, alt in nav_waypoints:
+    mission_items.append((
+        lat, lon, alt,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+        mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+        False
+    ))
 
-def make_mission_item_int(seq, lat, lon, alt):
-    frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
-    command = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+TOTAL_ITEMS = len(mission_items)  # 4 (홈 1 + 웨이포인트 3)
+
+
+def make_mission_item_int(seq, lat, lon, alt, frame, command):
     return master.mav.mission_item_int_encode(
         master.target_system, master.target_component,
         seq, frame, command,
@@ -66,9 +99,7 @@ def make_mission_item_int(seq, lat, lon, alt):
     )
 
 
-def make_mission_item_float(seq, lat, lon, alt):
-    frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
-    command = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+def make_mission_item_float(seq, lat, lon, alt, frame, command):
     return master.mav.mission_item_encode(
         master.target_system, master.target_component,
         seq, frame, command,
@@ -87,15 +118,8 @@ ALL_TYPES = REQUEST_TYPES + ['MISSION_ACK']
 
 def get_next_action(timeout=5):
     """
-    미션 업로드 중 다음에 처리할 메시지 하나를 결정한다.
-
-    규칙:
-    1) 버퍼에 MISSION_ACK가 하나라도 있으면 무조건 그것을 우선 반환한다.
-       ACK는 "이 거래는 끝났다"는 신호이므로, 그 이후에 뒤섞여 도착한
-       낡은 재요청(MISSION_REQUEST)으로 절대 덮어써서는 안 된다.
-       (이 부분이 이전 시도들에서 반복적으로 실패한 근본 원인이었다)
-    2) ACK가 없다면, 같은 배치 안에 쌓인 요청들 중 seq가 가장 높은 것,
-       즉 가장 앞서 나간 요청만 채택하고 낡은 저 seq 중복 요청은 버린다.
+    ACK가 버퍼에 있으면 무조건 우선 반환(세션 종료 신호),
+    없으면 요청들 중 가장 높은 seq만 채택.
     """
     first = master.recv_match(type=ALL_TYPES, blocking=True, timeout=timeout)
     if first is None:
@@ -110,30 +134,22 @@ def get_next_action(timeout=5):
 
     acks = [m for m in batch if m.get_type() == 'MISSION_ACK']
     if acks:
-        if len(batch) > 1:
-            print(f"    [정보] 배치 내 MISSION_ACK 발견 → 세션 종료 신호 우선 처리 "
-                  f"(폐기된 나머지: {[ (m.get_type(), getattr(m,'seq','-')) for m in batch if m is not acks[-1] ]})")
         return acks[-1]
 
     requests = sorted(batch, key=lambda m: m.seq)
-    chosen = requests[-1]
-    if len(batch) > 1:
-        print(f"    [정보] 낡은 중복 요청 {len(batch)-1}개 폐기, "
-              f"최신 {chosen.get_type()}(seq={chosen.seq}) 사용")
-    return chosen
+    return requests[-1]
 
 
 # -----------------------------
 # 3. 미션 업로드
 # -----------------------------
 def upload_mission():
-    total = len(waypoints)
-    print(f"[2] MISSION_COUNT 전송 (총 {total}개)...")
+    print(f"[2] MISSION_COUNT 전송 (총 {TOTAL_ITEMS}개, 홈 포함)...")
 
     master.mav.mission_count_send(
         master.target_system,
         master.target_component,
-        total,
+        TOTAL_ITEMS,
         mavutil.mavlink.MAV_MISSION_TYPE_MISSION
     )
 
@@ -144,21 +160,20 @@ def upload_mission():
             return False
 
         mtype = msg.get_type()
-        print(f" [DEBUG] from system={msg.get_srcSystem()}, "
-              f"component={msg.get_srcComponent()}, type={mtype}")
 
         if mtype in REQUEST_TYPES:
             seq = msg.seq
-            if seq >= total:
+            if seq >= TOTAL_ITEMS:
                 continue
 
-            lat, lon, alt = waypoints[seq]
-            print(f"  -> 요청 받음: seq={seq} ({mtype}), 전송: ({lat}, {lon}, {alt}m)")
+            lat, lon, alt, frame, command, is_home = mission_items[seq]
+            label = "홈" if is_home else "웨이포인트"
+            print(f"  -> 요청 받음: seq={seq} ({label}, {mtype}), 전송: ({lat:.6f}, {lon:.6f}, {alt}m)")
 
             if mtype == 'MISSION_REQUEST_INT':
-                item = make_mission_item_int(seq, lat, lon, alt)
+                item = make_mission_item_int(seq, lat, lon, alt, frame, command)
             else:
-                item = make_mission_item_float(seq, lat, lon, alt)
+                item = make_mission_item_float(seq, lat, lon, alt, frame, command)
 
             master.mav.send(item)
 
@@ -216,11 +231,12 @@ def start_auto_mission():
 # -----------------------------
 # 6. 미션 진행 상황 모니터링
 # -----------------------------
-def monitor_mission(total_waypoints):
+def monitor_mission(total_nav_waypoints):
+    # 홈(seq=0)을 제외한 실제 웨이포인트(seq=1~3) 도달만 카운트
     print("[6] 미션 진행 상황 모니터링 (Ctrl+C로 중단)")
     reached = set()
     try:
-        while len(reached) < total_waypoints:
+        while len(reached) < total_nav_waypoints:
             msg = master.recv_match(
                 type=['MISSION_CURRENT', 'MISSION_ITEM_REACHED'],
                 blocking=True,
@@ -231,7 +247,8 @@ def monitor_mission(total_waypoints):
 
             if msg.get_type() == 'MISSION_ITEM_REACHED':
                 print(f"  -> 웨이포인트 도달: seq={msg.seq}")
-                reached.add(msg.seq)
+                if msg.seq >= 1:  # 홈(0)은 제외
+                    reached.add(msg.seq)
             elif msg.get_type() == 'MISSION_CURRENT':
                 print(f"  -> 현재 진행 중인 웨이포인트: seq={msg.seq}")
     except KeyboardInterrupt:
@@ -246,6 +263,6 @@ if __name__ == '__main__':
         arm_and_takeoff(target_altitude=10)
         time.sleep(2)
         start_auto_mission()
-        monitor_mission(total_waypoints=len(waypoints))
+        monitor_mission(total_nav_waypoints=len(nav_waypoints))
     else:
         print("미션 업로드 실패로 비행을 진행하지 않습니다.")
