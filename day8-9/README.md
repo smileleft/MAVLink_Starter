@@ -90,7 +90,7 @@ GCS                                Vehicle (드론)
 
 ```bash
 cd ~/ardupilot
-sim_vehicle.py -v ArduCopter --console --map
+Tools/autotest/sim_vehicle.py -v ArduCopter --console --map
 ```
 
 `--map` 옵션을 켜두면 지도에서 실제 비행 경로를 시각적으로 확인할 수 있습니다.
